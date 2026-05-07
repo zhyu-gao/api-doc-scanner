@@ -65,6 +65,7 @@ class SourceApiScannerTest {
             package com.example;
 
             import com.model.UserVO;
+            import com.shared.Resp;
             import com.shared.PageResp;
             import org.springframework.web.bind.annotation.GetMapping;
             import org.springframework.web.bind.annotation.RestController;
@@ -99,27 +100,45 @@ class SourceApiScannerTest {
             }
             """.trimIndent()
         )
+        sharedRoot.resolve("Resp.java").writeText(
+            """
+            package com.shared;
+
+            import io.swagger.v3.oas.annotations.media.Schema;
+
+            public class Resp<T> {
+                @Schema(description = "执行状态")
+                private String message;
+                @Schema(description = "状态码")
+                private Integer status;
+                @Schema(description = "数据")
+                private T data;
+            }
+            """.trimIndent()
+        )
         sharedRoot.resolve("PageResp.java").writeText(
             """
             package com.shared;
 
             import java.util.List;
-            import io.swagger.annotations.ApiModelProperty;
+            import io.swagger.v3.oas.annotations.media.Schema;
 
             public class PageResp<T> {
-                @ApiModelProperty(value = "source items")
-                private List<T> items;
+                @Schema(description = "分页数据列表")
+                private List<T> list;
 
-                @ApiModelProperty(value = "source page")
-                private PageInfo pager;
+                @Schema(description = "分页数据")
+                private PageVO page;
             }
             """.trimIndent()
         )
-        sharedRoot.resolve("PageInfo.java").writeText(
+        sharedRoot.resolve("PageVO.java").writeText(
             """
             package com.shared;
 
-            public class PageInfo {
+            public class PageVO {
+                private Long pageCount;
+                private Long pageSize;
                 private Long pageNo;
                 private Long totalRecord;
             }
@@ -128,21 +147,26 @@ class SourceApiScannerTest {
 
         val endpoint = SourceApiScanner().scan(root).single()
         val response = assertNotNull(endpoint.httpMetadata?.responseBody) as ObjectModel.Object
+
+        // Resp fields from actual source code
+        assertTrue(response.fields.containsKey("message"))
+        assertTrue(response.fields.containsKey("status"))
+        assertTrue(response.fields.containsKey("data"))
+
         val data = assertNotNull(response.fields["data"]?.model) as ObjectModel.Object
 
-        assertTrue(data.fields.containsKey("items"))
-        assertTrue(data.fields.containsKey("pager"))
-        assertFalse(data.fields.containsKey("list"))
-        assertFalse(data.fields.containsKey("page"))
-        assertFalse(data.fields.containsKey("records"))
-        assertFalse(data.fields.containsKey("total"))
+        // PageResp fields from actual source code — "list" and "page", NOT hardcoded "records"/"total"
+        assertTrue(data.fields.containsKey("list"), "Expected 'list' field from PageResp source")
+        assertTrue(data.fields.containsKey("page"), "Expected 'page' field from PageResp source")
+        assertFalse(data.fields.containsKey("records"), "Should not have hardcoded 'records' field")
+        assertFalse(data.fields.containsKey("total"), "Should not have hardcoded 'total' field")
 
-        val list = assertNotNull(data.fields["items"]?.model) as ObjectModel.Array
+        val list = assertNotNull(data.fields["list"]?.model) as ObjectModel.Array
         val item = list.item as ObjectModel.Object
         assertTrue(item.fields.containsKey("name"))
         assertFalse(item.fields.containsKey("wrongPackageField"))
 
-        val page = assertNotNull(data.fields["pager"]?.model) as ObjectModel.Object
-        assertTrue(page.fields.keys.containsAll(listOf("pageNo", "totalRecord")))
+        val page = assertNotNull(data.fields["page"]?.model) as ObjectModel.Object
+        assertTrue(page.fields.keys.containsAll(listOf("pageCount", "pageSize", "pageNo", "totalRecord")))
     }
 }

@@ -38,8 +38,8 @@ java -jar easy-api-scanner.jar <source-dir> [options]
 | `-o, --output <path>`       | 输出文件路径；多模块时可指定目录或基础文件名               |
 | `--module <name>`           | 指定 OpenAPI 文档标题（模块名）                            |
 | `--apifox-token <token>`    | Apifox 访问令牌，也可通过环境变量 `APIFOX_TOKEN` 设置      |
-| `--apifox-project <id>`     | Apifox 项目 ID，也可通过环境变量 `APIFOX_PROJECT_ID` 设置  |
-| `--apifox-module <m=id>`    | 模块名到 Apifox 模块 ID 的映射，可重复使用                 |
+| `--apifox-project <id>`     | 默认的 Apifox 项目 ID，也可通过环境变量 `APIFOX_PROJECT_ID` 设置 |
+| `--apifox-module <m=pid[:mid]>`| 模块名到项目 ID（及可选的模块 ID）的映射。不传 mid 则上传到项目根目录 |
 | `--apifox-base-url <url>`   | Apifox API 地址（默认：`https://api.apifox.com`）          |
 | `--apifox-api-version <v>`  | Apifox API 版本号（默认：`2024-03-28`）                    |
 | `--apifox-url-prefix <url>` | Apifox 导入用的 URL 前缀，拼接 JSON 文件名后由 Apifox 拉取 |
@@ -95,19 +95,19 @@ java -jar easy-api-scanner.jar D:\project\my-app\src\main\java \
 
 假设输出文件名为 `openapi.json`，则实际导入 URL 为：`https://cdn.example.com/docs/openapi.json`
 
-### 多模块 + Apifox
+### 多模块 + Apifox (上传到不同项目)
 
 ```bash
 java -jar easy-api-scanner.jar D:\project\multi-module-app \
   -o D:\docs\openapi \
-  --apifox-project 12345 \
   --apifox-token APS-xxxxxxxxxxxx \
-  --apifox-module user-api=111 \
-  --apifox-module order-api=222 \
+  --apifox-module user-api=12345:111 \
+  --apifox-module order-api=67890 \
   --apifox-url-prefix https://cdn.example.com/docs
 ```
 
-每个模块会生成独立的 JSON 文件（如 `user-api.json`、`order-api.json`），并分别上传到对应的 Apifox 模块。
+每个模块会生成独立的 JSON 文件（如 `user-api.json`、`order-api.json`），并分别上传到对应的 Apifox 项目。
+`user-api` 会上传到项目 `12345` 的 `111` 模块中；`order-api`（不带冒号）会直接上传到项目 `67890` 的根目录。
 
 ### 环境变量
 

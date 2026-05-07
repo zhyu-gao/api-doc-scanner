@@ -11,7 +11,6 @@ import java.nio.charset.StandardCharsets
 
 class ApifoxClient(
     private val token: String,
-    private val projectId: String,
     private val baseUrl: String = "https://api.apifox.com",
     private val apiVersion: String = "2024-03-28"
 ) {
@@ -22,7 +21,7 @@ class ApifoxClient(
      * Import OpenAPI data via URL.
      * Official doc: https://apifox-openapi.apifox.cn/api-173409873
      */
-    fun importOpenApiByUrl(moduleName: String, moduleId: Long, openApiUrl: String): ApifoxImportResult {
+    fun importOpenApiByUrl(moduleName: String, projectId: String, moduleId: Long?, openApiUrl: String): ApifoxImportResult {
         val url = "${baseUrl.trimEnd('/')}/v1/projects/$projectId/import-openapi?locale=zh-CN"
 
         val requestBody = JsonObject().apply {
@@ -30,7 +29,9 @@ class ApifoxClient(
                 addProperty("url", openApiUrl)
             })
             add("options", JsonObject().apply {
-                addProperty("moduleId", moduleId)
+                if (moduleId != null) {
+                    addProperty("moduleId", moduleId)
+                }
                 addProperty("endpointOverwriteBehavior", "OVERWRITE_EXISTING")
                 addProperty("schemaOverwriteBehavior", "OVERWRITE_EXISTING")
                 addProperty("updateFolderOfChangedEndpoint", false)
@@ -39,7 +40,7 @@ class ApifoxClient(
             })
         }
         val body = gson.toJson(requestBody)
-        System.err.println("Apifox import by URL for $moduleName: $openApiUrl -> module $moduleId")
+        System.err.println("Apifox import by URL for $moduleName: $openApiUrl -> module ${moduleId ?: "root"}")
 
         val connection = URI(url).toURL().openConnection() as HttpURLConnection
         connection.requestMethod = "POST"
@@ -66,7 +67,7 @@ class ApifoxClient(
 
 data class ApifoxImportResult(
     val moduleName: String,
-    val moduleId: Long,
+    val moduleId: Long?,
     val status: Int,
     val responseBody: String,
     val counters: ImportCounters

@@ -61,13 +61,15 @@ fun main(args: Array<String>) {
     uploadToApifoxIfConfigured(config, generatedDocuments)
 }
 
+data class ModuleTarget(val projectId: String?, val moduleId: Long?)
+
 data class CliConfig(
     val sourcePath: String? = null,
     val outputPath: String? = null,
     val moduleName: String? = null,
     val apifoxToken: String? = null,
     val apifoxProjectId: String? = null,
-    val apifoxModuleIds: Map<String, Long> = emptyMap(),
+    val apifoxModuleTargets: Map<String, ModuleTarget> = emptyMap(),
     val apifoxBaseUrl: String = "https://api.apifox.com",
     val apifoxApiVersion: String = "2024-03-28",
     val apifoxUrlPrefix: String? = null,
@@ -80,7 +82,7 @@ private fun parseArgs(args: Array<String>): CliConfig {
     var moduleName: String? = null
     var apifoxToken: String? = null
     var apifoxProjectId: String? = null
-    val apifoxModuleIds = linkedMapOf<String, Long>()
+    val apifoxModuleTargets = linkedMapOf<String, ModuleTarget>()
     var apifoxBaseUrl = "https://api.apifox.com"
     var apifoxApiVersion = "2024-03-28"
     var apifoxUrlPrefix: String? = null
@@ -110,8 +112,8 @@ private fun parseArgs(args: Array<String>): CliConfig {
                 i++
             }
             "--apifox-module" -> {
-                parseModuleMapping(args.getOrNull(++i))?.let { (name, id) ->
-                    apifoxModuleIds[name] = id
+                parseModuleMapping(args.getOrNull(++i))?.let { (name, target) ->
+                    apifoxModuleTargets[name] = target
                 }
                 i++
             }
@@ -140,7 +142,7 @@ private fun parseArgs(args: Array<String>): CliConfig {
         moduleName = moduleName,
         apifoxToken = apifoxToken ?: System.getenv("APIFOX_TOKEN"),
         apifoxProjectId = apifoxProjectId ?: System.getenv("APIFOX_PROJECT_ID"),
-        apifoxModuleIds = apifoxModuleIds,
+        apifoxModuleTargets = apifoxModuleTargets,
         apifoxBaseUrl = apifoxBaseUrl,
         apifoxApiVersion = apifoxApiVersion,
         apifoxUrlPrefix = apifoxUrlPrefix,
@@ -161,7 +163,7 @@ private fun printUsage() {
           --module <name>          Module name for the OpenAPI title
           --apifox-token <token>   Apifox access token (or APIFOX_TOKEN)
           --apifox-project <id>    Apifox project id (or APIFOX_PROJECT_ID)
-          --apifox-module <m=id>   Module name to Apifox module id mapping, repeatable
+          --apifox-module <m=[pid:]id> Module name to Apifox project id and module id mapping, repeatable
           --apifox-base-url <url>  Apifox API base URL (default: https://api.apifox.com)
           --apifox-url-prefix <u>  URL prefix for Apifox import (Apifox fetches JSON from this URL + filename)
           -h, --help               Show this help message
@@ -175,7 +177,7 @@ private fun printUsage() {
           java -jar easy-api-scanner.jar D:\project\my-app --module "My Service" -o openapi.json
           java -jar easy-api-scanner.jar D:\project\multi-module-app -o D:\docs\openapi
           java -jar easy-api-scanner.jar D:\project\multi-module-app -o D:\docs\openapi --apifox-project 123 --apifox-token APS-xxx --apifox-module user-api=456
-          java -jar easy-api-scanner.jar D:\project\my-app -o D:\docs\openapi.json --apifox-project 123 --apifox-token APS-xxx --apifox-module my-api=456 --apifox-url-prefix https://cdn.example.com/docs
+          java -jar easy-api-scanner.jar D:\project\my-app -o D:\docs\openapi.json --apifox-project 123 --apifox-token APS-xxx --apifox-module my-api=123:456 --apifox-url-prefix https://cdn.example.com/docs
     """.trimIndent()
     )
 }
@@ -241,24 +243,35 @@ private fun isMultiModuleSource(sourceRoot: File): Boolean {
     return Regex("<module>\\s*([^<]+?)\\s*</module>").findAll(pom.readText()).count() > 1
 }
 
-private fun parseModuleMapping(value: String?): Pair<String, Long>? {
+private fun parseModuleMapping(value: String?): Pair<String, ModuleTarget>? {
     if (value.isNullOrBlank()) return null
     val separator = if ('=' in value) '=' else ':'
     val name = value.substringBefore(separator).trim()
-    val id = value.substringAfter(separator, "").trim().toLongOrNull()
-    if (name.isBlank() || id == null) {
-        System.err.println("Invalid --apifox-module value: $value, expected moduleName=moduleId")
+    val remainder = value.substringAfter(separator, "").trim()
+    
+    val projectId: String?
+    val moduleId: Long?
+    if (':' in remainder) {
+        projectId = remainder.substringBefore(':').trim().takeIf { it.isNotBlank() }
+        moduleId = remainder.substringAfter(':').trim().toLongOrNull()
+    } else {
+        projectId = remainder.takeIf { it.isNotBlank() }
+        moduleId = null
+    }
+    
+    if (name.isBlank() || (projectId == null && moduleId == null)) {
+        System.err.println("Invalid --apifox-module value: $value, expected moduleName=projectId[:moduleId] or moduleName=:moduleId or moduleName=projectId")
         return null
     }
-    return name to id
+    return name to ModuleTarget(projectId, moduleId)
 }
 
 private fun uploadToApifoxIfConfigured(config: CliConfig, documents: List<GeneratedOpenApiDocument>) {
     val token = config.apifoxToken
-    val projectId = config.apifoxProjectId
-    if (token.isNullOrBlank() && projectId.isNullOrBlank() && config.apifoxModuleIds.isEmpty()) return
-    if (token.isNullOrBlank() || projectId.isNullOrBlank()) {
-        System.err.println("Apifox upload skipped: --apifox-token and --apifox-project are both required.")
+    val defaultProjectId = config.apifoxProjectId
+    if (token.isNullOrBlank() && defaultProjectId.isNullOrBlank() && config.apifoxModuleTargets.isEmpty()) return
+    if (token.isNullOrBlank()) {
+        System.err.println("Apifox upload skipped: --apifox-token is required.")
         return
     }
     if (documents.isEmpty()) {
@@ -266,14 +279,21 @@ private fun uploadToApifoxIfConfigured(config: CliConfig, documents: List<Genera
         return
     }
 
-    val client = ApifoxClient(token, projectId, config.apifoxBaseUrl, config.apifoxApiVersion)
+    val client = ApifoxClient(token, config.apifoxBaseUrl, config.apifoxApiVersion)
     for (document in documents) {
-        val moduleId = config.apifoxModuleIds[document.moduleName]
-            ?: config.apifoxModuleIds[document.moduleName.removeSuffix("-api")]
-        if (moduleId == null) {
-            System.err.println("Apifox upload skipped for ${document.moduleName}: missing --apifox-module ${document.moduleName}=<moduleId>")
+        val target = config.apifoxModuleTargets[document.moduleName]
+            ?: config.apifoxModuleTargets[document.moduleName.removeSuffix("-api")]
+        if (target == null) {
+            System.err.println("Apifox upload skipped for ${document.moduleName}: missing --apifox-module ${document.moduleName}=...")
             continue
         }
+        
+        val targetProjectId = target.projectId ?: defaultProjectId
+        if (targetProjectId.isNullOrBlank()) {
+            System.err.println("Apifox upload skipped for ${document.moduleName}: projectId is not specified for module and no global --apifox-project provided.")
+            continue
+        }
+        
         try {
             if (!config.apifoxUrlPrefix.isNullOrBlank()) {
                 // URL mode: Apifox fetches the JSON from the URL
@@ -284,15 +304,15 @@ private fun uploadToApifoxIfConfigured(config: CliConfig, documents: List<Genera
                 }
                 val openApiUrl = config.apifoxUrlPrefix.trimEnd('/') + "/" + fileName
                 System.err.println("Apifox importing ${document.moduleName} from $openApiUrl")
-                val result = client.importOpenApiByUrl(document.moduleName, moduleId, openApiUrl)
+                val result = client.importOpenApiByUrl(document.moduleName, targetProjectId, target.moduleId, openApiUrl)
                 if (result.counters.endpointChanged == 0 && result.counters.endpointFailed == 0) {
                     System.err.println(
-                        "Apifox imported ${result.moduleName} from URL, module=${result.moduleId}, " +
+                        "Apifox imported ${result.moduleName} from URL, project=$targetProjectId, module=${result.moduleId ?: "root"}, " +
                             "status=${result.status}, but no endpoint changed. counters: ${result.counters}"
                     )
                 } else {
                     System.err.println(
-                        "Apifox imported ${result.moduleName} from URL, module=${result.moduleId}, " +
+                        "Apifox imported ${result.moduleName} from URL, project=$targetProjectId, module=${result.moduleId ?: "root"}, " +
                             "status=${result.status}, counters: ${result.counters}"
                     )
                 }

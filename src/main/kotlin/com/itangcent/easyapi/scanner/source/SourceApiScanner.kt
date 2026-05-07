@@ -488,10 +488,11 @@ private class SourceModelIndex(private val classes: List<SourceClassInfo>) {
         val classInfo = findClass(type, context)
             ?: return unknownGenericFallback(simpleName, args, context, typeVars)
                 ?: ObjectModel.Single(simpleName)
-        val scopedVars = typeVars + classInfo.typeParameters
-            .zip(args.map { qualifyType(it, context, typeVars) })
+        val qualifiedArgs = args.map { qualifyType(it, context, typeVars) }
+        val scopedVars = classInfo.typeParameters
+            .zip(qualifiedArgs)
             .toMap()
-        val cacheKey = classInfo.fullyQualifiedName + args.joinToString(prefix = "<", postfix = ">") { it.asString() }
+        val cacheKey = classInfo.fullyQualifiedName + qualifiedArgs.joinToString(prefix = "<", postfix = ">") { it.asString() }
         if (!resolving.add(cacheKey)) return ObjectModel.Single("object")
 
         val fields = collectFields(classInfo, scopedVars).associate { resolvedField ->
@@ -527,33 +528,13 @@ private class SourceModelIndex(private val classes: List<SourceClassInfo>) {
         typeVars: Map<String, Type>
     ): ObjectModel? {
         if (args.isEmpty()) return null
-        if (simpleName == "Resp") {
-            val data = resolve(substituteTypeVars(args.first(), typeVars), context, typeVars)
-                ?: ObjectModel.Single("object")
-            return ObjectModel.Object(
-                fields = linkedMapOf(
-                    "message" to FieldModel(ObjectModel.Single("string"), comment = "执行状态"),
-                    "status" to FieldModel(ObjectModel.Single("int"), comment = "状态码"),
-                    "data" to FieldModel(data, comment = "数据")
-                ),
-                id = "$simpleName<${args.first().asString()}>"
-            )
-        }
-        if (simpleName in RESPONSE_WRAPPER_TYPES) {
-            return resolve(substituteTypeVars(args.first(), typeVars), context, typeVars)
-        }
-        if (simpleName in PAGE_WRAPPER_TYPES) {
-            val item = resolve(substituteTypeVars(args.first(), typeVars), context, typeVars)
-                ?: ObjectModel.Single("object")
-            return ObjectModel.Object(
-                fields = linkedMapOf(
-                    "records" to FieldModel(ObjectModel.Array(item), comment = "数据列表"),
-                    "total" to FieldModel(ObjectModel.Single("long"), comment = "总数"),
-                    "size" to FieldModel(ObjectModel.Single("long"), comment = "每页条数"),
-                    "current" to FieldModel(ObjectModel.Single("long"), comment = "当前页")
-                ),
-                id = "$simpleName<${args.first().asString()}>"
-            )
+        // For unknown generic types with a single type argument, try to resolve the
+        // type argument directly. This handles cases where the source code for a generic
+        // wrapper (e.g. Resp<T>, PageResp<T>) is available but not discovered by the
+        // scanner. Instead of fabricating fields, we transparently unwrap to the argument.
+        if (args.size == 1) {
+            val resolved = resolve(substituteTypeVars(args.first(), typeVars), context, typeVars)
+            if (resolved != null) return resolved
         }
         return null
     }
@@ -639,8 +620,6 @@ private class SourceModelIndex(private val classes: List<SourceClassInfo>) {
     companion object {
         private val COLLECTION_TYPES = setOf("List", "Set", "Collection", "ArrayList", "HashSet", "LinkedList")
         private val MAP_TYPES = setOf("Map", "HashMap", "LinkedHashMap", "TreeMap")
-        private val RESPONSE_WRAPPER_TYPES = setOf("Result", "R", "Response", "ApiResponse", "CommonResult")
-        private val PAGE_WRAPPER_TYPES = setOf("PageResult", "PageResponse")
     }
 }
 

@@ -14,7 +14,7 @@ class OpenApiJsonFormatter {
 
     fun format(endpoints: List<ApiEndpoint>, moduleName: String = "API Documentation"): String {
         val root = JsonObject()
-        root.addProperty("openapi", "3.0.3")
+        root.addProperty("openapi", "3.1.0")
         root.add("info", JsonObject().apply {
             addProperty("title", moduleName)
             addProperty("version", "1.0.0")
