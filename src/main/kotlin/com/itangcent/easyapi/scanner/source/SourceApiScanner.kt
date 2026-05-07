@@ -40,14 +40,7 @@ class SourceApiScanner {
         val modelRoots = discoverModelRoots(endpointRoot, endpointModules)
         val classInfos = readSourceClasses(modelRoots)
 
-        val pomFiles = discoverPomFiles(endpointRoot, endpointModules)
-        val dependencyJars = MavenDependencyResolver.resolveDependencyJars(pomFiles.toList())
-        val classBytesMap = dependencyJars.flatMap { jar ->
-            com.itangcent.easyapi.scanner.jar.createJarClassProvider(jar.absolutePath).provideClasses()
-        }.associateBy { it.fullyQualifiedName }
-        val modelScanner = com.itangcent.easyapi.scanner.asm.ModelClassScanner(classBytesMap)
-
-        val index = SourceModelIndex(classInfos, modelScanner)
+        val index = SourceModelIndex(classInfos)
         return endpointModules.mapNotNull { module ->
             val contextPath = ContextPathReader.readContextPath(module.sourceRoot)
             if (contextPath.isNotBlank()) {
@@ -85,6 +78,24 @@ class SourceApiScanner {
                 classInfos.add(readClass(file, cu, packageName, imports, clazz))
             }
         }
+        
+        // Parse built-in API classes from resources
+        val builtInApis = listOf("BeanConvertor.java", "ErrorData.java", "PageReq.java", "PageResp.java", "PageVO.java", "Resp.java", "RespData.java")
+        for (api in builtInApis) {
+            val stream = SourceApiScanner::class.java.classLoader.getResourceAsStream("api/$api")
+            if (stream != null) {
+                val result = parser.parse(stream)
+                val cu = result.result.orElse(null) ?: continue
+                val packageName = cu.packageDeclaration.map { it.nameAsString }.orElse("")
+                val imports = cu.imports.map { if (it.isAsterisk) "${it.nameAsString}.*" else it.nameAsString }
+                val dummyFile = File("src/main/resources/api/$api")
+                cu.findAll(ClassOrInterfaceDeclaration::class.java).forEach { clazz ->
+                    if (clazz.isNestedType) return@forEach
+                    classInfos.add(readClass(dummyFile, cu, packageName, imports, clazz))
+                }
+            }
+        }
+        
         return classInfos
     }
 
@@ -156,28 +167,6 @@ class SourceApiScanner {
         return searchBases
             .flatMap { findArtifactSourceRoots(it, artifactIds) }
             .distinctBy { it.canonicalPath }
-    }
-
-    private fun discoverPomFiles(
-        sourceRoot: File,
-        endpointModules: List<SourceModuleRoot>
-    ): Set<File> {
-        val pomFiles = linkedSetOf<File>()
-        val moduleRoot = findNearestPomDir(sourceRoot)
-        val aggregatorRoot = moduleRoot?.let { findNearestAggregatorPomDir(it) }
-
-        moduleRoot?.let { pomFiles.add(File(it, "pom.xml")) }
-        aggregatorRoot?.let { root ->
-            pomFiles.add(File(root, "pom.xml"))
-            readMavenModules(root).forEach { module ->
-                val moduleDir = File(root, module.replace('/', File.separatorChar)).canonicalFile
-                val pom = File(moduleDir, "pom.xml")
-                if (pom.isFile) pomFiles.add(pom)
-            }
-        }
-        endpointModules.mapNotNullTo(pomFiles) { findNearestPomDir(it.sourceRoot)?.let { dir -> File(dir, "pom.xml") } }
-        
-        return pomFiles.filter { it.isFile }.toSet()
     }
 
     private fun localModuleNames(
@@ -481,10 +470,7 @@ class SourceApiScanner {
     }
 }
 
-private class SourceModelIndex(
-    private val classes: List<SourceClassInfo>,
-    private val modelScanner: com.itangcent.easyapi.scanner.asm.ModelClassScanner
-) {
+private class SourceModelIndex(private val classes: List<SourceClassInfo>) {
     private val byFqn = classes.associateBy { it.fullyQualifiedName }
     private val bySimple = classes.groupBy { it.simpleName }
     private val resolving = mutableSetOf<String>()
@@ -518,16 +504,8 @@ private class SourceModelIndex(
         }
         val args = typeArgs(type)
         val classInfo = findClass(type, context)
-        if (classInfo == null) {
-             // Fallback to ASM scanning first
-             val typeSignature = type.toTypeSignature(context)
-             val fqn = findFqn(type, context)
-             val resolvedFromAsm = modelScanner.resolve(fqn, typeSignature, 10)
-             if (resolvedFromAsm != null) return resolvedFromAsm
-             
-             return unknownGenericFallback(simpleName, args, context, typeVars)
+            ?: return unknownGenericFallback(simpleName, args, context, typeVars)
                 ?: ObjectModel.Single(simpleName)
-        }
         val qualifiedArgs = args.map { qualifyType(it, context, typeVars) }
         val scopedVars = classInfo.typeParameters
             .zip(qualifiedArgs)
@@ -618,25 +596,18 @@ private class SourceModelIndex(
     }
 
     private fun findClass(type: ClassOrInterfaceType, context: SourceClassInfo): SourceClassInfo? {
-        val fqn = findFqn(type, context)
-        byFqn[fqn]?.let { return it }
-        for (wildcardImport in context.imports.filter { it.endsWith(".*") }) {
-            val simpleName = type.nameAsString.substringAfterLast('.')
-            byFqn["${wildcardImport.removeSuffix(".*")}.$simpleName"]?.let { return it }
-        }
-        val simpleName = type.nameAsString.substringAfterLast('.')
-        return bySimple[simpleName]?.firstOrNull()
-    }
-
-    private fun findFqn(type: ClassOrInterfaceType, context: SourceClassInfo): String {
         val typeText = type.asString()
         val simpleName = type.nameAsString.substringAfterLast('.')
         if (typeText.contains('.')) {
-            return typeText.substringBefore('<')
+            byFqn[typeText.substringBefore('<')]?.let { return it }
         }
         val imported = context.imports.firstOrNull { it.endsWith(".$simpleName") }
-        if (imported != null) return imported
-        return if (context.packageName.isBlank()) simpleName else "${context.packageName}.$simpleName"
+        if (imported != null) return byFqn[imported]
+        for (wildcardImport in context.imports.filter { it.endsWith(".*") }) {
+            byFqn["${wildcardImport.removeSuffix(".*")}.$simpleName"]?.let { return it }
+        }
+        val samePackage = if (context.packageName.isBlank()) simpleName else "${context.packageName}.$simpleName"
+        return byFqn[samePackage] ?: bySimple[simpleName]?.firstOrNull()
     }
 
     private fun primitiveName(type: PrimitiveType): String = when (type.type) {
@@ -662,19 +633,6 @@ private class SourceModelIndex(
         "Date", "LocalDate", "LocalDateTime", "Instant" -> "datetime"
         "Void", "void" -> "void"
         else -> null
-    }
-
-    private fun Type.toTypeSignature(context: SourceClassInfo): String {
-        return when (this) {
-            is ClassOrInterfaceType -> {
-                val args = typeArguments.orElse(null)?.joinToString("") { it.toTypeSignature(context) }
-                val fqn = findFqn(this, context)
-                if (args == null) "L${fqn.replace('.', '/')};"
-                else "L${fqn.replace('.', '/')}<$args>;"
-            }
-            is ArrayType -> "[${this.componentType.toTypeSignature(context)}"
-            else -> "Ljava/lang/Object;"
-        }
     }
 
     companion object {
