@@ -1,0 +1,101 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'          # 推送 v* 标签时触发（如 v0.1.0）
+  workflow_dispatch:   # 支持手动触发
+
+permissions:
+  contents: write      # 需要创建 Release 的写权限
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run tests
+        run: ./gradlew test
+
+      - name: Build shadow JAR
+        run: ./gradlew shadowJar
+
+      - name: Get version from build
+        id: version
+        run: |
+          VERSION=$(./gradlew -q printVersion 2>/dev/null || echo "")
+          if [ -z "$VERSION" ]; then
+            # Fallback: extract from build.gradle.kts
+            VERSION=$(grep -oP 'version\s*=\s*"\K[^"]+' build.gradle.kts)
+          fi
+          # Use tag name if available, otherwise use version from build
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            TAG_VERSION="v${VERSION}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION, tag: $TAG_VERSION"
+
+      - name: Find JAR file
+        id: jar
+        run: |
+          JAR_PATH=$(find build/libs -name "easy-api-scanner-*.jar" -not -name "*-sources*" -not -name "*-javadoc*" | head -1)
+          JAR_NAME=$(basename "$JAR_PATH")
+          echo "path=$JAR_PATH" >> "$GITHUB_OUTPUT"
+          echo "name=$JAR_NAME" >> "$GITHUB_OUTPUT"
+          echo "Found JAR: $JAR_PATH"
+
+      - name: Create Release (tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## Easy API Scanner ${{ github.ref_name }}
+
+            ### 下载
+            下载 `${{ steps.jar.outputs.name }}` 即可使用：
+            ```bash
+            java -jar ${{ steps.jar.outputs.name }} <source-dir> [options]
+            ```
+
+            ### 更新内容
+            详见 [commits](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }})
+          files: ${{ steps.jar.outputs.path }}
+          draft: false
+          prerelease: false
+
+      - name: Create Release (manual / branch push)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}-${{ github.run_number }}
+          name: Dev Build ${{ steps.version.outputs.tag }}-${{ github.run_number }}
+          body: |
+            ## Easy API Scanner (Dev Build)
+
+            **Branch:** `${{ github.ref_name }}`
+            **Commit:** `${{ github.sha }}`
+
+            ### 下载
+            ```bash
+            java -jar ${{ steps.jar.outputs.name }} <source-dir> [options]
+            ```
+          files: ${{ steps.jar.outputs.path }}
+          draft: false
+          prerelease: true
