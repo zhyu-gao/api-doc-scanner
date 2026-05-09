@@ -360,10 +360,11 @@ private fun buildIncrementalOpenApiJson(existingFile: File, fullOpenApiJson: Str
         return fullOpenApiJson
     }
     val newRoot = JsonParser.parseString(fullOpenApiJson).asJsonObject
+
+    // Compare paths
     val oldPaths = oldRoot.getAsJsonObject("paths") ?: JsonObject()
     val newPaths = newRoot.getAsJsonObject("paths") ?: JsonObject()
     val changedPaths = JsonObject()
-
     for ((path, newPathElement) in newPaths.entrySet()) {
         val newPathObject = newPathElement.asJsonObject
         val oldPathObject = oldPaths.getAsJsonObject(path)
@@ -380,10 +381,41 @@ private fun buildIncrementalOpenApiJson(existingFile: File, fullOpenApiJson: Str
         }
     }
 
-    if (changedPaths.size() == 0) return null
-    val deltaRoot = newRoot.deepCopy()
-    deltaRoot.add("paths", changedPaths)
+    // Compare components/schemas
+    val oldSchemas = oldRoot
+        .getAsJsonObject("components")
+        ?.getAsJsonObject("schemas") ?: JsonObject()
+    val newSchemas = newRoot
+        .getAsJsonObject("components")
+        ?.getAsJsonObject("schemas") ?: JsonObject()
+    val changedSchemas = buildChangedSchemas(oldSchemas, newSchemas)
+
+    if (changedPaths.size() == 0 && changedSchemas.size() == 0) return null
+
+    val deltaRoot = JsonObject()
+    deltaRoot.addProperty("openapi", newRoot.get("openapi")?.asString ?: "3.1.0")
+    newRoot.getAsJsonObject("info")?.let { deltaRoot.add("info", it) }
+    newRoot.getAsJsonArray("servers")?.let { deltaRoot.add("servers", it) }
+    if (changedPaths.size() > 0) {
+        deltaRoot.add("paths", changedPaths)
+    }
+    if (changedSchemas.size() > 0) {
+        val components = JsonObject()
+        components.add("schemas", changedSchemas)
+        deltaRoot.add("components", components)
+    }
     return gson.toJson(deltaRoot)
+}
+
+private fun buildChangedSchemas(oldSchemas: JsonObject, newSchemas: JsonObject): JsonObject {
+    val changed = JsonObject()
+    for ((name, newSchema) in newSchemas.entrySet()) {
+        val oldSchema = oldSchemas.get(name)
+        if (oldSchema == null || oldSchema != newSchema) {
+            changed.add(name, newSchema)
+        }
+    }
+    return changed
 }
 
 private fun newSuffixFile(outputFile: File): File {
