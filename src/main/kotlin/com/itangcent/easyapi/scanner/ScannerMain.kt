@@ -5,6 +5,7 @@ import com.itangcent.easyapi.scanner.apifox.ApifoxClient
 import com.itangcent.easyapi.scanner.source.ModuleApiScanResult
 import com.itangcent.easyapi.scanner.source.SourceApiScanner
 import com.google.gson.Gson
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.io.File
@@ -351,7 +352,7 @@ private fun writeIncrementalDocument(
     return GeneratedOpenApiDocument(moduleName, title, deltaJson, incrementalFile)
 }
 
-private fun buildIncrementalOpenApiJson(existingFile: File, fullOpenApiJson: String): String? {
+internal fun buildIncrementalOpenApiJson(existingFile: File, fullOpenApiJson: String): String? {
     val gson = Gson()
     val oldRoot = try {
         JsonParser.parseString(existingFile.readText()).asJsonObject
@@ -361,19 +362,31 @@ private fun buildIncrementalOpenApiJson(existingFile: File, fullOpenApiJson: Str
     }
     val newRoot = JsonParser.parseString(fullOpenApiJson).asJsonObject
 
-    // Compare paths
     val oldPaths = oldRoot.getAsJsonObject("paths") ?: JsonObject()
     val newPaths = newRoot.getAsJsonObject("paths") ?: JsonObject()
+    val oldSchemas = oldRoot
+        .getAsJsonObject("components")
+        ?.getAsJsonObject("schemas") ?: JsonObject()
+    val newSchemas = newRoot
+        .getAsJsonObject("components")
+        ?.getAsJsonObject("schemas") ?: JsonObject()
+    val changedSchemaNames = changedSchemaNames(oldSchemas, newSchemas)
+    val selectedSchemaNames = linkedSetOf<String>()
     val changedPaths = JsonObject()
+
     for ((path, newPathElement) in newPaths.entrySet()) {
         val newPathObject = newPathElement.asJsonObject
         val oldPathObject = oldPaths.getAsJsonObject(path)
         val changedPathObject = JsonObject()
         for ((method, newOperation) in newPathObject.entrySet()) {
             if (method !in HTTP_METHOD_NAMES) continue
+            val operationSchemaNames = expandSchemaRefs(collectSchemaRefs(newOperation), newSchemas)
             val oldOperation = oldPathObject?.get(method)
-            if (oldOperation == null || oldOperation != newOperation) {
+            val operationChanged = oldOperation == null || oldOperation != newOperation
+            val referencedSchemaChanged = operationSchemaNames.any { it in changedSchemaNames }
+            if (operationChanged || referencedSchemaChanged) {
                 changedPathObject.add(method, newOperation)
+                selectedSchemaNames.addAll(operationSchemaNames)
             }
         }
         if (changedPathObject.size() > 0) {
@@ -381,16 +394,9 @@ private fun buildIncrementalOpenApiJson(existingFile: File, fullOpenApiJson: Str
         }
     }
 
-    // Compare components/schemas
-    val oldSchemas = oldRoot
-        .getAsJsonObject("components")
-        ?.getAsJsonObject("schemas") ?: JsonObject()
-    val newSchemas = newRoot
-        .getAsJsonObject("components")
-        ?.getAsJsonObject("schemas") ?: JsonObject()
-    val changedSchemas = buildChangedSchemas(oldSchemas, newSchemas)
+    val selectedSchemas = buildSelectedSchemas(newSchemas, selectedSchemaNames)
 
-    if (changedPaths.size() == 0 && changedSchemas.size() == 0) return null
+    if (changedPaths.size() == 0 && selectedSchemas.size() == 0) return null
 
     val deltaRoot = JsonObject()
     deltaRoot.addProperty("openapi", newRoot.get("openapi")?.asString ?: "3.1.0")
@@ -399,23 +405,87 @@ private fun buildIncrementalOpenApiJson(existingFile: File, fullOpenApiJson: Str
     if (changedPaths.size() > 0) {
         deltaRoot.add("paths", changedPaths)
     }
-    if (changedSchemas.size() > 0) {
-        val components = JsonObject()
-        components.add("schemas", changedSchemas)
+    val components = JsonObject()
+    if (selectedSchemas.size() > 0) {
+        components.add("schemas", selectedSchemas)
+    }
+    newRoot.getAsJsonObject("components")
+        ?.getAsJsonObject("securitySchemes")
+        ?.let { components.add("securitySchemes", it) }
+    if (components.size() > 0) {
         deltaRoot.add("components", components)
     }
     return gson.toJson(deltaRoot)
 }
 
-private fun buildChangedSchemas(oldSchemas: JsonObject, newSchemas: JsonObject): JsonObject {
-    val changed = JsonObject()
+private fun changedSchemaNames(oldSchemas: JsonObject, newSchemas: JsonObject): Set<String> {
+    val changed = linkedSetOf<String>()
     for ((name, newSchema) in newSchemas.entrySet()) {
         val oldSchema = oldSchemas.get(name)
         if (oldSchema == null || oldSchema != newSchema) {
-            changed.add(name, newSchema)
+            changed.add(name)
         }
     }
     return changed
+}
+
+private fun buildSelectedSchemas(newSchemas: JsonObject, selectedSchemaNames: Set<String>): JsonObject {
+    val selectedSchemas = JsonObject()
+    for (name in selectedSchemaNames) {
+        newSchemas.get(name)?.let { selectedSchemas.add(name, it.deepCopy()) }
+    }
+    return selectedSchemas
+}
+
+private fun expandSchemaRefs(schemaNames: Set<String>, schemas: JsonObject): Set<String> {
+    val expanded = linkedSetOf<String>()
+    fun visit(name: String) {
+        if (!expanded.add(name)) return
+        val schema = schemas.get(name) ?: return
+        for (nestedName in collectSchemaRefs(schema)) {
+            visit(nestedName)
+        }
+    }
+    for (name in schemaNames) {
+        visit(name)
+    }
+    return expanded
+}
+
+private fun collectSchemaRefs(element: JsonElement?): Set<String> {
+    val refs = linkedSetOf<String>()
+    fun visit(current: JsonElement?) {
+        if (current == null || current.isJsonNull) return
+        when {
+            current.isJsonObject -> {
+                val currentObject = current.asJsonObject
+                currentObject.get("\$ref")
+                    ?.takeIf { it.isJsonPrimitive }
+                    ?.asString
+                    ?.let { schemaNameFromRef(it) }
+                    ?.let { refs.add(it) }
+                for ((_, value) in currentObject.entrySet()) {
+                    visit(value)
+                }
+            }
+            current.isJsonArray -> {
+                for (item in current.asJsonArray) {
+                    visit(item)
+                }
+            }
+        }
+    }
+    visit(element)
+    return refs
+}
+
+private fun schemaNameFromRef(ref: String): String? {
+    val prefix = "#/components/schemas/"
+    if (!ref.startsWith(prefix)) return null
+    return ref.removePrefix(prefix)
+        .replace("~1", "/")
+        .replace("~0", "~")
+        .takeIf { it.isNotBlank() }
 }
 
 private fun newSuffixFile(outputFile: File): File {
